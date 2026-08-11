@@ -144,6 +144,7 @@ if ((process.env.DOCKER_RUNNER || process.env.SANDBOXED_COMPILES) === 'true') {
         HOME: '/tmp',
         CLSI: 1,
       },
+      sandboxFontMount: (process.env.SANDBOX_FONT_MOUNT || ''), // Added by haojun: 2026-08-11-10:53:14
       socketPath: '/var/run/docker.sock',
       user: process.env.TEXLIVE_IMAGE_USER || 'tex',
     },

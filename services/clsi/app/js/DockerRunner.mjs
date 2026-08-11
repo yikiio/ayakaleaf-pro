@@ -75,6 +75,25 @@ const DockerRunner = {
     ) {
       volumes[directory] += ':ro'
     }
+        
+    // for (const bind of Settings.clsi.docker.sandboxFontMounts || []) {
+    //   const [hostPath, containerPath, mode] = bind.split(':')
+    //   if (!hostPath || !containerPath) {
+    //     logger.warn({ bind }, 'ignoring invalid sandbox font mount')
+    //     continue
+    //   }
+    //   const bindTarget = mode ? `${containerPath}:${mode}` : containerPath
+    //   volumes[hostPath] = bindTarget
+        // }
+        
+    // Added by haojun: 2026-08-11-10:53:14
+    const [hostPath, containerPath, mode] = Settings.clsi.docker.sandboxFontMount.split(':') 
+    if (!hostPath || !containerPath) {
+    logger.warn({ bind }, 'ignoring invalid sandbox font mount')
+    }
+    const bindTarget = mode ? `${containerPath}:${mode}` : containerPath
+    volumes[hostPath] = bindTarget
+    // Added by haojun: 2026-08-11-10:53:14
 
     const options = DockerRunner._getContainerOptions(
       command,
