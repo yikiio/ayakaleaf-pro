@@ -1,3 +1,14 @@
+<h4>Usage</h4>
+
+1. Build base image
+
+`cd server-ce`
+
+`make build-base`
+
+2. build overleaf-pro image
+
+` make build-community OVERLEAF_TAG=yikiio/overleaf-pro:tagname`
 
 <h4 align="center">Overleaf Community Edition enhanced with all Pro features <br/>(open source, free to use, self-hostable).</h4>
 
