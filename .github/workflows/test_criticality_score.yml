@@ -1,0 +1,38 @@
+# ---------------------------------
+# This workflow is used to compute the OpenSSF criticality score
+# of this repository with the built-in GITHUB_TOKEN
+#
+# See:
+#     https://github.com/ossf/criticality_score
+#
+# ---------------------------------
+
+name: Test Criticality Score
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  criticality-score:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: "Setup go environment"
+        uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - name: "Install criticality_score"
+        # v2.0.4 reads issue counts from the rel="last" link, which the issues API
+        # no longer sends; apply ossf/criticality_score#829 until a release has it
+        run: |
+          git clone --depth 1 -b v2.0.4 https://github.com/ossf/criticality_score
+          curl -fsSL https://github.com/ossf/criticality_score/commit/6da1c69cc033d7cd4cd4e9fcb0ca9d6ce01a62a5.diff | git -C criticality_score apply
+          cd criticality_score && go install ./cmd/criticality_score
+      - name: "Compute criticality score"
+        env:
+          GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+        run: |
+          # The deps.dev BigQuery dataset is no longer available, skip it
+          criticality_score -depsdev-disable -format json https://github.com/${{github.repository}}

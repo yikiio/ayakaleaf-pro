@@ -34,6 +34,7 @@ function reset() {
     commits: new Map(), // sha -> { tree, parents, message, author }
     repos: new Map(), // full name -> repo
     denyNextAuthorize: false,
+    nextDownloadDelay: 0, // ms
   }
 }
 reset()
@@ -602,6 +603,15 @@ const github = [
       send(res, 201, commitJson(sha))
     },
   ],
+  // No pull requests are opened here: branches are merged with git commits
+  [
+    'GET',
+    /^\/repos\/([^/]+)\/([^/]+)\/pulls$/,
+    ({ req, res, params: [owner, name] }) => {
+      repoFor(req, owner, name)
+      send(res, 200, [])
+    },
+  ],
   [
     'GET',
     /^\/repos\/([^/]+)\/([^/]+)\/compare\/([^.]+)\.\.\.(.+)$/,
@@ -632,8 +642,13 @@ const github = [
   [
     'GET',
     /^\/repos\/([^/]+)\/([^/]+)\/contents\/(.+)$/,
-    ({ req, res, url, params: [owner, name, path] }) => {
+    async ({ req, res, url, params: [owner, name, path] }) => {
       const repo = repoFor(req, owner, name)
+      if (state.nextDownloadDelay) {
+        const delay = state.nextDownloadDelay
+        state.nextDownloadDelay = 0
+        await new Promise(resolve => setTimeout(resolve, delay))
+      }
       const ref = url.searchParams.get('ref') || repo.defaultBranch
       const commit = state.commits.has(ref) ? ref : repo.refs.get(ref)
       const blob = commit && treeOf(commit)[path]
@@ -725,6 +740,31 @@ const control = [
       send(res, 201, { head })
     },
   ],
+  // A branch deleted on GitHub
+  [
+    'DELETE',
+    /^\/_mock\/repos\/([^/]+)\/([^/]+)\/branches\/(.+)$/,
+    ({ res, url, params: [owner, name, branch] }) => {
+      const repo = state.repos.get(`${owner}/${name}`)
+      if (!repo) throw new HttpError(404, 'Not Found')
+      const head = repo.refs.get(branch)
+      if (!head) throw new HttpError(404, 'No such branch')
+      repo.refs.delete(branch)
+      // ?gc=true also drops the commits no branch reaches any more, as
+      // GitHub and GitLab eventually do with unreachable commits
+      if (url.searchParams.get('gc') === 'true') {
+        const reachable = new Set(
+          [...state.repos.values()].flatMap(r =>
+            [...r.refs.values()].flatMap(sha => [...ancestors(sha)])
+          )
+        )
+        for (const sha of ancestors(head)) {
+          if (!reachable.has(sha)) state.commits.delete(sha)
+        }
+      }
+      send(res, 204)
+    },
+  ],
   // Body: { files: { path: content } } - replaces the default branch with a
   // commit that shares no history with it, like a force push
   [
@@ -774,6 +814,16 @@ const control = [
     /^\/_mock\/deny-next-authorize$/,
     ({ res }) => {
       state.denyNextAuthorize = true
+      send(res, 204)
+    },
+  ],
+  // Body: { ms } - the next file download waits, so a sync stays in the
+  // middle of pulling for that long
+  [
+    'POST',
+    /^\/_mock\/delay-next-download$/,
+    ({ res, body }) => {
+      state.nextDownloadDelay = body.ms
       send(res, 204)
     },
   ],

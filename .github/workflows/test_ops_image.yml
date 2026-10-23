@@ -22,13 +22,12 @@ permissions:
   packages: read
 env:
   DOCKER_REGISTRY: ghcr.io
-  IMAGE_NAME: ayaka-notes/overleaf-pro
 
 jobs:
   # Deploy the image with the toolkit and run one suite per runner,
   # see server-ce/test/README.md
   e2e-test:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       # Every suite runs a whole Overleaf, keep the number of runners bounded
@@ -39,19 +38,25 @@ jobs:
             launchpad,
             login-register,
             sandboxed-compiles,
+            pandoc,
             symbol-palette,
             template-gallery,
             git-bridge,
+            mcp-server,
+            oauth2-server,
             track-changes,
             open-in-overleaf,
             learn,
             reference-picker,
             github-sync,
+            gitlab-sync,
+            dropbox,
             tpr-webmodule,
             python-runner,
             workbench,
             error-assistant,
             instance-features,
+            admin-tools,
             authentication/ldap,
             authentication/saml,
             authentication/oidc
@@ -70,8 +75,16 @@ jobs:
       # --- Deploy And Test ---
       - name: "Setup Overleaf With Toolkit"
         working-directory: ./server-ce/test/toolkit
+        # Mongo sometimes exits while the toolkit starts it, start over then
         run: |
-          make setup SUITE=${{matrix.suite}} OVERLEAF_IMAGE=${{env.DOCKER_REGISTRY}}/${{env.IMAGE_NAME}}/ops:${{inputs.ops_tag || 'latest'}}
+          # GHCR image names must be lowercase
+          image=${{env.DOCKER_REGISTRY}}/${GITHUB_REPOSITORY_OWNER,,}/overleaf-pro/ops:${{inputs.ops_tag || 'latest'}}
+          for attempt in 1 2 3; do
+            make setup SUITE=${{matrix.suite}} OVERLEAF_IMAGE=$image && exit 0
+            echo "::warning::Setup attempt $attempt failed"
+            make clean OVERLEAF_IMAGE=$image
+          done
+          exit 1
       - name: "Run E2E Tests"
         working-directory: ./server-ce/test/toolkit
         run: |
@@ -81,6 +94,8 @@ jobs:
       - name: "Print Overleaf Logs"
         if: failure()
         run: |
+          docker logs --tail 200 mongo || true
+          docker inspect mongo --format 'exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}}' || true
           docker logs --tail 200 sharelatex
           docker exec sharelatex bash -c 'tail -n 100 /var/log/overleaf/*.log'
       # Artifact names cannot contain the slash of nested suites

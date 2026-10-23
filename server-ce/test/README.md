@@ -21,6 +21,10 @@ make clean                   # remove everything again
 Run `make clean` before you set up for another suite, every suite starts
 from an empty Overleaf.
 
+To run only some cases, add `GREP` to `make test`: it keeps the cases whose
+full title (the `describe` names and the `it` name) contains the text, e.g.
+`make test SUITE=admin-tools GREP="purges a deleted account"`.
+
 If port 80 is already in use on your machine, add `OVERLEAF_PORT=8080` to
 `make setup`. To test an image other than the latest ops image, add
 `OVERLEAF_IMAGE=<image>`.
@@ -42,15 +46,27 @@ One folder per module in `toolkit/suites/`, named and nested like
 - `symbol-palette/` – opening and closing the palette, switching categories
   by click and keyboard, searching by command, description and character,
   empty search results, inserting symbols by click and keyboard at the editor
-  cursor, the tooltip.
+  cursor, the tooltip. Draw mode: switching to the canvas and back,
+  recognising drawn symbols with the bundled model, inserting a result and
+  clearing the canvas.
 - `track-changes/` – editing, reviewing and viewing modes, tracked insertions
   and deletions, accepting and rejecting them, comments (reply, edit, delete,
-  resolve, re-open), and which routes owners, editors, reviewers, viewers,
-  link viewers and other users may call.
+  resolve, re-open), the Overview tab listing the comments of docs that are
+  not loaded in the document-updater (a copied project), the authors of
+  tracked changes not saved to docstore yet, and which routes owners, editors,
+  reviewers, viewers, link viewers and other users may call. The
+  `anonymous-sharing/` variant lets a signed-out editor through the edit link
+  delete threads, and refuses resolving and reopening them.
 - `git-bridge/` – git tokens in the settings, cloning, pushing and pulling
-  with the git CLI: binary files, folders, renames, deletes, out-of-date
-  pushes, and access for invited and link-shared editors, reviewers and
-  viewers.
+  with the git CLI: binary files, folders, renames, deletes, docs with a
+  non-text extension staying docs, out-of-date pushes, and access for invited and link-shared editors, reviewers and
+  viewers. git-bridge runs on port 8001, so nginx must follow
+  `GIT_BRIDGE_HOST`/`GIT_BRIDGE_PORT`, and its internal routes stay 404.
+- `oauth2-server/` – the Git authentication tokens in the settings: generating,
+  the token shown once, the table with its dates and last use, cancelling and
+  deleting, the 10 token limit, and the API behind it: one year validity, no
+  secrets in the list, `/oauth/token/info` for git-bridge, logins and other
+  users' tokens. Git-bridge is on, the settings only show the tokens with it.
 - `open-in-overleaf/` – the `/docs` endpoint: snippets, encoded snippets,
   data URLs with names, main document and engine, zips, refused and internal
   URLs, the login for signed-out visitors, and the `/devs` page. The
@@ -61,7 +77,8 @@ One folder per module in `toolkit/suites/`, named and nested like
   missing pages, the login for signed-out visitors, and the Documentation
   links in the header, the welcome message and the editor's Help menu.
   Pages come from the public Overleaf wiki, so this suite needs internet
-  access and starts slower.
+  access and starts slower. The `wiki-unreachable/` variant runs afterwards
+  with the wiki down and every cached page stale.
 - `python-runner/` – running `.py` files with the self-hosted Pyodide: output
   and the last value, stderr, Python and syntax errors, packages that are not
   built in, built-in packages from the instance, reading project files,
@@ -79,6 +96,21 @@ One folder per module in `toolkit/suites/`, named and nested like
   pushing, merging, conflicts and the manual merge, renames and deletes,
   binary files, force pushes, lost push access, and what collaborators may
   do. Git-bridge is on as the docs require.
+- `gitlab-sync/` – GitLab Sync against `toolkit/services/gitlab-mock`, a
+  self-managed GitLab at `gitlab.example.com`: linking and unlinking the GitLab
+  account through the OAuth application, refreshing expiring tokens,
+  exporting a project into a new project, importing a repository, pulling,
+  pushing, merging through a merge request (deleted when allowed), conflicts
+  and merges held back by approval or pipeline rules, renames and deletes,
+  binary files, force pushes, lost push access, and what collaborators may
+  do. Git-bridge is on as the docs require.
+- `dropbox/` – Dropbox Sync against `toolkit/services/dropbox-mock`, which
+  answers as the Dropbox API and sends signed webhooks: linking and unlinking
+  through OAuth, the projects sent when linking (owned and shared), edits
+  sent by Sync now and once the project is closed, binary files, renames,
+  moves, deletions and project folders of the same name both ways, retries,
+  a request that never answers, unusable accounts and disabled users; the
+  `rate-limits` variant checks Sync now's limit.
 - `tpr-webmodule/` – Zotero and Mendeley against `toolkit/services/tpr-mock`:
   linking and unlinking through OAuth 1.0a (Zotero, with its signatures
   checked) and OAuth 2.0 (Mendeley), cancelled and refused links, forged
@@ -103,9 +135,21 @@ One folder per module in `toolkit/suites/`, named and nested like
   with it: AI assistant, GitHub Sync, Zotero and Mendeley, all off on the
   default instance and all on in the `enabled/` variant, with git-bridge,
   which GitHub Sync needs.
+- `admin-tools/` – the admin panel: who may open it, finding users by
+  email and id, creating accounts and activating them with the link from
+  Info, duplicate emails, changing names, emails, passwords and the admin
+  flag, the collaborator limit, turning AI off and the token usage,
+  disabling and enabling users one by one and in bulk, deleting accounts with
+  and without giving their projects to another user, restoring and purging
+  them, and the license tab. For projects: a user's projects and every
+  project, search by name, id and owner, trashing, deleting, restoring,
+  purging and downloading, and changing the owner of one or several projects,
+  with the old owner kept as editor.
 - `template-gallery/` – publishing a project as a template, the gallery
   (categories, search, sort, pages), editing, overwriting and deleting
-  templates, creating projects from them, permissions.
+  templates, creating projects from them, permissions. The `templates-user/`
+  variant runs with `OVERLEAF_TEMPLATES_USER_ID` set to a user that is not an
+  admin, created by `toolkit/services/templates-user`.
 - `authentication/ldap/`, `authentication/saml/`, `authentication/oidc/` –
   login through [goauthentik](https://goauthentik.io), admin mapping and its
   updates on login. LDAP and SAML start with the launchpad's email-only admin
@@ -123,6 +167,9 @@ Things that need email (activation mails, password reset) are not tested.
   `config/overleaf.rc` and `config/variables.env`.
 - `toolkit/suites/<name>/overleaf.rc`, `variables.env` – optional extra
   settings for just that suite, applied after `toolkit/config/`.
+- `toolkit/suites/<name>/docker-compose.e2e.yml` – optional, replaces
+  `toolkit/config/docker-compose.e2e.yml` for that suite, for settings the
+  toolkit fixes in its compose files (keep the e2e lines in it).
 - `toolkit/suites/<name>/<variant>/` – optional second mode of the same
   module: its own specs plus the settings that differ. `make test_<name>`
   applies them, restarts Overleaf and runs the variant after the main specs.

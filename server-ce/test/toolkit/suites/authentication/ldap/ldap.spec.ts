@@ -1,12 +1,22 @@
 import {
   currentUser,
+  expectSsoPasswordRefused,
   idpEmail,
   isSiteAdmin,
   ldapLogin,
+  requestPasswordReset,
   resetAuthentikUsers,
+  setAuthentikAttributes,
   setAuthentikGroup,
   setAuthentikName,
+  updatePassword,
 } from '../../../../helpers/auth'
+import {
+  createLocalAccount,
+  setSuspended,
+  setUserPassword,
+} from '../../../../helpers/adminTools'
+import { login } from '../../../../helpers/login'
 import { postWithCsrf } from '../../../../helpers/request'
 
 // LDAP login through authentik's LDAP outpost (services/authentik). Admins
@@ -117,6 +127,31 @@ describe('LDAP profile and logout', function () {
     currentUser().its('first_name').should('equal', 'Alice')
   })
 
+  it('takes the first value of a name attribute with several values', function () {
+    // Like cn in inetOrgPerson, the name attribute may hold several values
+    setAuthentikAttributes('alice', { name: ['Ally Renamed', 'Alice Admin'] })
+    loginAs('alice')
+    currentUser().then(user => {
+      expect([user.first_name, user.last_name]).to.deep.equal(['Ally', 'Renamed'])
+    })
+    setAuthentikAttributes('alice', {})
+  })
+
+  it('lists directory contacts when one of them has several names', function () {
+    setAuthentikAttributes('alice', { name: ['Ally Renamed', 'Alice Admin'] })
+    loginAs('bob')
+    cy.request('/user/contacts').then(response => {
+      const alice = response.body.contacts.find(
+        (contact: { email: string }) => contact.email === idpEmail('alice')
+      )
+      expect([alice.first_name, alice.last_name]).to.deep.equal([
+        'Ally',
+        'Renamed',
+      ])
+    })
+    setAuthentikAttributes('alice', {})
+  })
+
   it('logs out and requires the password again', function () {
     loginAs('bob')
     cy.visit('/logout')
@@ -127,5 +162,61 @@ describe('LDAP profile and logout', function () {
     cy.url().should('contain', '/login')
     loginAs('bob')
     currentUser().its('email').should('equal', idpEmail('bob'))
+  })
+})
+
+describe('password reset of an LDAP account', function () {
+  it('refuses to send a reset email, the password is in the directory', function () {
+    loginAs('bob')
+    requestPasswordReset(idpEmail('bob')).then(expectSsoPasswordRefused)
+  })
+
+  it('does not let the user change the password on the settings page', function () {
+    loginAs('bob')
+    cy.visit('/user/settings')
+    cy.contains('p', 'because your group or organization uses single sign-on')
+    // CE does not check change-password on the route, the current password
+    // of an account without one never matches
+    updatePassword('anything', `New-${Cypress._.random(1e9)}-Pass`)
+      .its('status')
+      .should('equal', 400)
+  })
+
+  it('does not let an admin give the user a password', function () {
+    loginAs('carol')
+    setUserPassword(idpEmail('bob'), `Admin-${Cypress._.random(1e9)}-Pass`)
+      .its('status')
+      .should('equal', 422)
+  })
+  it('lets a local account change the password on the settings page', function () {
+    const email = `local-${Cypress._.random(1e9)}@example.com`
+    const password = `Local-${Cypress._.random(1e9)}-Pass`
+    loginAs('carol')
+    createLocalAccount(email)
+    setUserPassword(email, password).its('status').should('equal', 200)
+    cy.clearAllCookies()
+    login(email, password)
+    cy.visit('/user/settings')
+    cy.findByLabelText('Current password')
+    updatePassword(password, `Changed-${Cypress._.random(1e9)}-Pass`)
+      .its('status')
+      .should('equal', 200)
+  })
+})
+
+describe('LDAP login of a disabled account', function () {
+  it('sends the user to the account suspended page until enabled again', function () {
+    loginAs('dave')
+    loginAs('carol')
+    setSuspended(idpEmail('dave'), true)
+    ldapLogin('dave')
+    cy.url().should('contain', '/account-suspended')
+    cy.visit('/project')
+    cy.url().should('contain', '/login')
+
+    loginAs('carol')
+    setSuspended(idpEmail('dave'), false)
+    loginAs('dave')
+    currentUser().its('email').should('equal', idpEmail('dave'))
   })
 })

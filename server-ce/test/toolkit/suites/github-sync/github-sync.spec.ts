@@ -38,7 +38,11 @@ type MockRepo = {
   commits: MockCommit[]
 }
 
-function mock(method: 'GET' | 'POST' | 'PUT', path: string, body?: object) {
+function mock(
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+  path: string,
+  body?: object
+) {
   return cy.request({
     method,
     url: `http://github-mock:8080/_mock${path}`,
@@ -185,6 +189,24 @@ describe('linking the GitHub account', function () {
     cy.visit('/user/settings')
     githubWidget().findByRole('link', { name: 'Link' }).should('exist')
     connectionStatus().should('equal', false)
+  })
+
+  describe('when connecting to GitHub takes over a second', function () {
+    afterEach(function () {
+      mock('POST', '/connect-delay', { ms: 0 })
+    })
+
+    it('links the account and unlinks it again', function () {
+      // fetch-utils' default agent gives up connecting after 1s
+      mock('POST', '/connect-delay', { ms: 1200 })
+      linkGitHubAccount()
+      connectionStatus().should('equal', true)
+
+      githubWidget().findByRole('button', { name: 'Unlink' }).click()
+      cy.findByRole('dialog').findByRole('button', { name: 'Unlink' }).click()
+      githubWidget().findByRole('link', { name: 'Link' }).should('exist')
+      connectionStatus().should('equal', false)
+    })
   })
 })
 
@@ -421,6 +443,14 @@ describe('syncing a linked project', function () {
     })
   }
 
+  // With gc, the commits only the branch reached are cleaned up too
+  function deleteBranchOnGitHub(branch: string, gc = false) {
+    return mock(
+      'DELETE',
+      `/repos/${fullName}/branches/${branch}${gc ? '?gc=true' : ''}`
+    )
+  }
+
   function mergeOverview() {
     return cy
       .request(`/project/${projectId}/github-sync/merge/overview`)
@@ -542,6 +572,52 @@ describe('syncing a linked project', function () {
     })
   })
 
+  it('keeps edits made in Overleaf while pulling for the next sync', function () {
+    commitOnGitHub({ 'chapter.tex': 'Chapter from GitHub' }, 'Chapter on GitHub')
+    openProject(projectId)
+    // The pull waits on downloading chapter.tex; the page's own request is
+    // not awaited so that the edit below lands in the middle of it
+    mock('POST', '/delay-next-download', { ms: 8000 })
+    cy.get('meta[name="ol-csrfToken"]')
+      .invoke('attr', 'content')
+      .then(csrfToken => {
+        cy.window().then(win => {
+          // a promise on the window, cy.wrap would wait for it right away
+          ;(win as any).pull = win
+            .fetch(`/project/${projectId}/github-sync/merge`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-Csrf-Token': csrfToken as string,
+              },
+              body: JSON.stringify({ message: '', claimConflictIsResolved: false }),
+            })
+            .then(response => response.json())
+        })
+      })
+    cy.findByRole('textbox', { name: 'Source Editor editing' }).within(() => {
+      cy.findByText('First line').click()
+      cy.findByText('First line').type('{end}\nWritten while pulling')
+    })
+    cy.window()
+      .then(win => cy.wrap((win as any).pull, { timeout: 30000 }))
+      .its('mergeStatus')
+      .should('equal', 'clean')
+    mockRepo(fullName).then(repo => {
+      expect(repo.files['main.tex']).not.to.contain('Written while pulling')
+      expect(repo.files['chapter.tex']).to.equal('Chapter from GitHub')
+    })
+    // The edit is still pending and goes out with the next sync
+    waitForProjectUpdated()
+    openSyncModalInEditor()
+    syncNow()
+    expectUpToDate()
+    mockRepo(fullName).then(repo => {
+      expect(repo.files['main.tex']).to.contain('First line\nWritten while pulling')
+      expect(repo.files['chapter.tex']).to.equal('Chapter from GitHub')
+    })
+  })
+
   it('merges changes made on both sides to different files', function () {
     commitOnGitHub(
       { 'chapter.tex': 'Chapter from GitHub' },
@@ -622,6 +698,141 @@ describe('syncing a linked project', function () {
     cy.get('.cm-content')
       .should('contain.text', 'First line from GitHub')
       .and('contain.text', 'Main from Overleaf')
+  })
+
+  it('keeps the conflict when the user continues without merging', function () {
+    commitOnGitHub(
+      { 'main.tex': main.replace('First line', 'First line from GitHub') },
+      'Main on GitHub'
+    )
+    openProject(projectId)
+    editMainInOverleaf('Main from Overleaf')
+    openSyncModalInEditor()
+    syncNow()
+    syncModal().should('contain.text', 'could not be automatically merged')
+    projectSyncState(projectId).then(state => {
+      cy.wrap(state.unmergedBranchName).as('unmergedBranch')
+    })
+
+    // The branch is not merged on GitHub: GitHub's side must not replace
+    // Overleaf's changes
+    syncModal()
+      .findByRole('button', { name: 'I have manually merged. Continue' })
+      .click()
+    syncModal()
+      .should('contain.text', 'could not be automatically merged')
+      .findByRole('button', { name: 'I have manually merged. Continue' })
+      .should('exist')
+    cy.get<string>('@unmergedBranch').then(branch => {
+      projectSyncState(projectId).should('deep.include', {
+        mergeStatus: 'conflict',
+        unmergedBranchName: branch,
+      })
+      mockRepo(fullName).then(repo => {
+        expect(repo.branches).to.have.property(branch)
+        expect(repo.files['main.tex']).not.to.contain('Main from Overleaf')
+      })
+    })
+    openProject(projectId)
+    cy.get('.cm-content')
+      .should('contain.text', 'Main from Overleaf')
+      .and('not.contain.text', 'First line from GitHub')
+  })
+
+  it('rebuilds a branch deleted without merging', function () {
+    commitOnGitHub(
+      { 'main.tex': main.replace('First line', 'First line from GitHub') },
+      'Main on GitHub'
+    )
+    openProject(projectId)
+    editMainInOverleaf('Main from Overleaf')
+    openSyncModalInEditor()
+    syncNow()
+    syncModal().should('contain.text', 'could not be automatically merged')
+    // The branch is deleted and its commit cleaned up on GitHub
+    projectSyncState(projectId).then(state => {
+      deleteBranchOnGitHub(state.unmergedBranchName, true)
+    })
+
+    // Nothing is left to merge: the branch is rebuilt from the Overleaf
+    // history and the conflict stays, GitHub's side replaces nothing
+    syncModal()
+      .findByRole('button', { name: 'I have manually merged. Continue' })
+      .click()
+    syncModal().should('contain.text', 'could not be automatically merged')
+    projectSyncState(projectId).then(state => {
+      expect(state.mergeStatus).to.equal('conflict')
+      cy.wrap(state.unmergedBranchName).as('rebuiltBranch')
+      mockRepo(fullName).then(repo => {
+        expect(repo.branches).to.have.property(state.unmergedBranchName)
+        expect(repo.files['main.tex']).to.contain('First line from GitHub')
+        expect(repo.files['main.tex']).not.to.contain('Main from Overleaf')
+      })
+    })
+    openProject(projectId)
+    cy.get('.cm-content')
+      .should('contain.text', 'Main from Overleaf')
+      .and('not.contain.text', 'First line from GitHub')
+
+    // The user merges the rebuilt branch, then continues
+    cy.get<string>('@rebuiltBranch').then(branch => {
+      commitOnGitHub(
+        {
+          'main.tex': main.replace(
+            'First line',
+            'First line from GitHub\nMain from Overleaf'
+          ),
+        },
+        'Merge Overleaf changes',
+        branch
+      )
+    })
+    openSyncModalInEditor()
+      .findByRole('button', { name: 'I have manually merged. Continue' })
+      .click()
+    expectUpToDate()
+    projectSyncState(projectId).its('mergeStatus').should('equal', 'clean')
+    cy.get('.cm-content')
+      .should('contain.text', 'First line from GitHub')
+      .and('contain.text', 'Main from Overleaf')
+  })
+
+  it('continues when the branch was deleted after merging', function () {
+    commitOnGitHub(
+      { 'main.tex': main.replace('First line', 'First line from GitHub') },
+      'Main on GitHub'
+    )
+    openProject(projectId)
+    editMainInOverleaf('Main from Overleaf')
+    openSyncModalInEditor()
+    syncNow()
+    syncModal().should('contain.text', 'could not be automatically merged')
+    projectSyncState(projectId).then(state => {
+      cy.wrap(state.unmergedBranchName).as('unmergedBranch')
+      commitOnGitHub(
+        {
+          'main.tex': main.replace(
+            'First line',
+            'First line from GitHub\nMain from Overleaf'
+          ),
+        },
+        'Merge Overleaf changes',
+        state.unmergedBranchName
+      )
+      deleteBranchOnGitHub(state.unmergedBranchName, true)
+    })
+    syncModal()
+      .findByRole('button', { name: 'I have manually merged. Continue' })
+      .click()
+    expectUpToDate()
+    projectSyncState(projectId).its('mergeStatus').should('equal', 'clean')
+    cy.get('.cm-content')
+      .should('contain.text', 'First line from GitHub')
+      .and('contain.text', 'Main from Overleaf')
+    cy.get<string>('@unmergedBranch').then(branch => {
+      // the merged branch is not brought back
+      mockRepo(fullName).its('branches').should('not.have.property', branch)
+    })
   })
 
   it('keeps edits made in Overleaf while a conflict is open', function () {
@@ -726,6 +937,26 @@ describe('syncing a linked project', function () {
     entityPaths().should('deep.equal', ['/main.tex'])
   })
 
+  it('pushes an empty file created in Overleaf into a force-pushed branch', function () {
+    openProject(projectId)
+    openRailTab('File tree')
+    cy.findByRole('button', { name: 'New file' }).click()
+    cy.findByRole('dialog').within(() => {
+      cy.findByLabelText(/^File name$/i).clear().type('empty.tex')
+      cy.findByRole('button', { name: 'Create' }).click()
+    })
+    cy.findByRole('treeitem', { name: 'empty.tex' }).should('exist')
+    waitForProjectUpdated()
+    mock('POST', `/repos/${fullName}/force-push`, {
+      files: { 'main.tex': main, 'chapter.tex': 'Chapter rewritten on GitHub' },
+    })
+    openSyncModalInEditor()
+    syncModal().should('contain.text', 'has been force-pushed')
+    syncNow()
+    expectUpToDate()
+    mockRepo(fullName).its('files').should('have.property', 'empty.tex', '')
+  })
+
   it('offers to unlink a repository the user can no longer push to', function () {
     mock('PUT', `/repos/${fullName}/permissions`, { push: false })
     openGitHubSyncModal(projectId)
@@ -758,6 +989,20 @@ describe('collaborators', function () {
       syncModal()
         .findByRole('button', { name: 'Create a GitHub repository' })
         .should('not.exist')
+      // Nor through the API: no repository is created or linked
+      const name = projectName('FromEditor')
+      postWithCsrf(`/project/${projectId}/github-sync/export`, { name })
+        .its('status')
+        .should('equal', 403)
+      projectSyncState(projectId)
+        .its('mergeStatus')
+        .should('equal', 'need-export')
+      cy.request({
+        url: `http://github-mock:8080/_mock/repos/${GITHUB_USER}/${name}`,
+        failOnStatusCode: false,
+      })
+        .its('status')
+        .should('equal', 404)
     })
   })
 

@@ -1,4 +1,5 @@
 import { v4 as uuid } from 'uuid'
+import { setSuspended } from '../../../helpers/adminTools'
 import {
   createGitToken,
   git,
@@ -15,7 +16,7 @@ import {
 } from '../../../helpers/project'
 import { requestWithCsrf } from '../../../helpers/request'
 import { shareProject, shareProjectByLink } from '../../../helpers/sharing'
-import { ensureUserExists } from '../../../helpers/users'
+import { ADMIN_EMAIL, ensureUserExists } from '../../../helpers/users'
 
 // git-bridge module with the git-bridge container of the toolkit, built from
 // this checkout (services/git-bridge). Projects are cloned and pushed with
@@ -132,6 +133,18 @@ describe('git access to a project', function () {
       .should('contain', '\\documentclass')
   })
 
+  it("keeps git-bridge's internal routes behind nginx", function () {
+    for (const path of [
+      `/git/api/v0/docs/${projectId}`,
+      '/git/metrics',
+      '/git/diags',
+    ]) {
+      cy.request({ url: path, failOnStatusCode: false })
+        .its('status')
+        .should('equal', 404)
+    }
+  })
+
   it('pushes a change that shows in the editor and in the history', function () {
     login(owner)
     const dir = workingCopy('push')
@@ -227,6 +240,27 @@ describe('git access to a project', function () {
       git(`cat ${clone}/chapters/intro.tex`)
         .its('stdout')
         .should('equal', 'In a folder')
+    })
+  })
+
+  it('keeps a doc created in the editor a doc when its push looks binary', function () {
+    // New file in the editor makes a doc whatever the extension, while csv is
+    // not a text extension: only the existing doc keeps it editable
+    login(owner)
+    cy.visit('/project')
+    requestWithCsrf('POST', `/project/${projectId}/doc`, { name: 'data.csv' })
+      .its('status')
+      .should('equal', 200)
+    const dir = workingCopy('csv-doc')
+    createGitToken().then(token => {
+      gitClone(projectId, token, dir)
+      gitCommitAndPush(dir, 'data.csv', 'x,y\n1,2', 'Edit the data')
+        .its('exitCode')
+        .should('equal', 0)
+    })
+    projectEntities(projectId).should('deep.include', {
+      path: '/data.csv',
+      type: 'doc',
     })
   })
 
@@ -374,6 +408,37 @@ describe('git access to a project', function () {
       gitClone(projectId, token, workingCopy('deleted'))
         .its('exitCode')
         .should('not.equal', 0)
+    })
+  })
+})
+
+describe('git access of a disabled account', function () {
+  it('refuses clone and push until the account is enabled again', function () {
+    const member = `disabled-${uuid()}@example.com`
+    ensureUserExists(member)
+    let projectId: string
+    login(member)
+    createProject(projectName('Git disabled')).then(id => {
+      projectId = id
+    })
+    createGitToken().then(token => {
+      const dir = workingCopy('disabled')
+      gitClone(projectId, token, dir).its('exitCode').should('equal', 0)
+
+      login(ADMIN_EMAIL)
+      setSuspended(member, true)
+      gitClone(projectId, token, workingCopy('while-disabled'))
+        .its('exitCode')
+        .should('not.equal', 0)
+      gitCommitAndPush(dir, 'notes.tex', 'Disabled', 'While disabled')
+        .its('exitCode')
+        .should('not.equal', 0)
+
+      login(ADMIN_EMAIL)
+      setSuspended(member, false)
+      gitClone(projectId, token, workingCopy('enabled-again'))
+        .its('exitCode')
+        .should('equal', 0)
     })
   })
 })

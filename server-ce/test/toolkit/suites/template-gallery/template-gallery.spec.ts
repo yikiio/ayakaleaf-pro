@@ -1,8 +1,10 @@
 import { v4 as uuid } from 'uuid'
 import { login } from '../../../helpers/login'
 import {
+  compileProject,
   createProject,
   openNewProject,
+  openProject,
   projectName,
 } from '../../../helpers/project'
 import { postWithCsrf, requestWithCsrf } from '../../../helpers/request'
@@ -145,6 +147,44 @@ describe('publishing a template', function () {
       `/project/${projectId}`
     )
   })
+
+  it('asks to recompile when the PDF of the build is gone', function () {
+    login(ADMIN_EMAIL)
+    createProject(projectName('NoPdf')).then(id => {
+      publishTemplate(id, {
+        name: projectName('NoPdf'),
+        build: '0000000000000-0000000000000000',
+      }).then(response => {
+        expect(response.status).to.equal(400)
+        expect(response.body.message).to.equal(
+          'Failed to publish as a template. Recompile from scratch'
+        )
+      })
+    })
+  })
+
+  it('asks for a main file when the main file was deleted after compiling', function () {
+    login(ADMIN_EMAIL)
+    createProject(projectName('NoMain')).then(id => {
+      compileProject(id).then(build => {
+        openProject(id)
+        cy.findByRole('treeitem', { name: 'main.tex' }).click()
+        cy.findByRole('button', { name: 'Open main.tex action menu' }).click()
+        cy.findByRole('menuitem', { name: 'Delete' }).click()
+        cy.findByRole('dialog').findByRole('button', { name: 'Delete' }).click()
+        cy.findByRole('treeitem', { name: 'main.tex' }).should('not.exist')
+
+        publishTemplate(id, { name: projectName('NoMain'), build }).then(
+          response => {
+            expect(response.status).to.equal(400)
+            expect(response.body.message).to.contain(
+              'Please choose the main file for this project'
+            )
+          }
+        )
+      })
+    })
+  })
 })
 
 describe('creating a project from a template', function () {
@@ -199,6 +239,30 @@ describe('creating a project from a template', function () {
       .findByRole('combobox', { name: 'Compiler' })
       .find('option:selected')
       .should('have.text', 'XeLaTeX')
+  })
+
+  it('uses the default TeX Live image when the one of the template is no longer offered', function () {
+    login(user)
+    getTemplate(templateId).then(template => {
+      const query = new URLSearchParams({
+        id: templateId,
+        version: String(template.version),
+        name: template.name,
+        compiler: template.compiler,
+        mainFile: template.mainFile,
+        language: template.language,
+        // removed from ALL_TEX_LIVE_DOCKER_IMAGES since it was published
+        imageName: 'texlive-basic:2017.1',
+      })
+      cy.visit(`/project/new/template/?${query}`)
+    })
+    cy.url({ timeout: 60_000 }).should('match', /\/project\/[0-9a-f]{24}$/)
+    cy.findByRole('button', { name: 'Settings' }).click()
+    cy.findByRole('dialog').findByRole('tab', { name: 'Compiler' }).click()
+    cy.findByRole('dialog')
+      .findByRole('combobox', { name: 'TeX Live version' })
+      .find('option:selected')
+      .should('have.text', '2026.1')
   })
 
   it('gives two independent projects when opened twice', function () {
@@ -727,6 +791,47 @@ describe('template robustness', function () {
     requestTemplateRoute(`/template/${templateId}/zip?version=99`)
       .its('status')
       .should('be.gte', 400)
+  })
+
+  // The id and the version are joined into the filestore URL, so anything
+  // but an ObjectId and a number could reach another filestore key.
+  it('fetches template files only for an ObjectId and a numeric version', function () {
+    login(user)
+    requestTemplateRoute(`/template/${templateId}/zip?version=1`)
+      .its('status')
+      .should('equal', 200)
+    for (const route of ['zip', 'preview']) {
+      for (const version of ['99/../1', '1#', '1?style=x', '-1', '1.0', ' 1', 'abc']) {
+        requestTemplateRoute(
+          `/template/${templateId}/${route}?version=${encodeURIComponent(version)}`
+        )
+          .its('status')
+          .should('equal', 404)
+      }
+      requestTemplateRoute(
+        `/template/${encodeURIComponent(`x/../${templateId}`)}/${route}?version=1`
+      )
+        .its('status')
+        .should('equal', 404)
+    }
+
+    cy.visit('/project')
+    for (const [badTemplateId, badVersion] of [
+      [templateId, '99/../1'],
+      [templateId, 'abc'],
+      [`x/../${templateId}`, '1'],
+    ]) {
+      postWithCsrf('/project/new/template/post_back', {
+        templateId: badTemplateId,
+        templateVersionId: badVersion,
+        templateName: 'traversal',
+        compiler: 'pdflatex',
+        mainFile: 'main.tex',
+        language: 'en',
+      })
+        .its('status')
+        .should('equal', 400)
+    }
   })
 
   it('looks templates up by id or name only', function () {

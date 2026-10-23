@@ -9,7 +9,7 @@ import GitHubSyncHandler from './GitHubSyncHandler.mjs'
 import TokenManager from './TokenManager.mjs'
 import api from './GitHubApiClient.mjs'
 import { doGitMerge } from './GitMerge.mjs'
-import { InvalidTokenError, GitNotLinkedError } from './GitSyncErrors.mjs'
+import { InvalidTokenError } from './GitSyncErrors.mjs'
 
 async function getConnectionStatus(req, res) {
   const userId = SessionManager.getLoggedInUserId(req.session)
@@ -159,7 +159,7 @@ async function unlink(req, res) {
     const info = OError.getFullInfo(err)
     const errStatus  = info?.status || 500
     logger.error(OError.getFullStack(err))
-    logger.error({ info, projectId }, 'Error removing user credentials')
+    logger.error({ info, userId }, 'Error removing user credentials')
     return res.status(errStatus).json({ message: err.message })
   }
   res.sendStatus(200)
